@@ -125,18 +125,26 @@ size_t lob_stream_read(php_stream *stream, char *buf, size_t count TSRMLS_DC)
 	long sLength;
 
 	switch (col_res->data_type) {
+		default:
+#ifndef PASE
+		case SQL_LONGVARCHAR:
+#else /* i5os string type required for the ascii->ebcdic conversion */
+		case SQL_CLOB:
+		case SQL_DBCLOB:
+#endif
+			ctype = SQL_C_CHAR;
+			break;
+#ifndef PASE
 		case SQL_LONGVARBINARY:
+#endif
 		case SQL_VARBINARY:
 		case SQL_BINARY:
 		case SQL_BLOB:
-#ifndef PASE /* i5os string type required for the ascii->ebcdic conversion */
+#ifndef PASE
 		case SQL_CLOB:
-#endif /* PASE */
+#endif
 		case SQL_XML:
 			ctype = SQL_C_BINARY;
-			break;
-		default:
-			ctype = SQL_C_CHAR;
 			break;
 	}
 
@@ -331,7 +339,9 @@ static int stmt_get_parameter_info(pdo_stmt_t * stmt, struct pdo_bound_param_dat
 #endif
 			case SQL_XML:
 			case SQL_VARBINARY:
+#ifndef PASE
 			case SQL_LONGVARBINARY:
+#endif
 				param_res->ctype = SQL_C_BINARY;
 				break;
 
@@ -344,7 +354,7 @@ static int stmt_get_parameter_info(pdo_stmt_t * stmt, struct pdo_bound_param_dat
 				param_res->ctype = SQL_C_LONG;
 				break;
 
-			/* everything else will transfer as character */
+			/* everything else will transfer as binary */
 			default:
 				/* by default, we transfer as character data */
 				param_res->ctype = SQL_C_CHAR;
@@ -354,189 +364,34 @@ static int stmt_get_parameter_info(pdo_stmt_t * stmt, struct pdo_bound_param_dat
 	return TRUE;
 }
 
-static int db2_inout_parm_numeric(param_node *param_res) {
-	/* need character to number padding */
-	switch ( param_res->data_type ) {
-	case SQL_SMALLINT:
-	case SQL_INTEGER:
-	case SQL_REAL:
-	case SQL_FLOAT:
-	case SQL_DOUBLE:
-	case SQL_DECFLOAT:
-	case SQL_BIGINT:
-	case SQL_DECIMAL:
-	case SQL_NUMERIC:
-		return 1;
-	default:
-		break;
-	}
-	return 0;
-}
-static int db2_inout_parm_pad_len(param_node *param_res) {
-	/* length full char pad for number expanded */
-	switch ( param_res->data_type ) {
-	case SQL_REAL:
-	case SQL_FLOAT:
-	case SQL_DOUBLE:
-	case SQL_DECFLOAT:
-	case SQL_BIGINT:
-		return 20;
-		break;
-	case SQL_DECIMAL:
-		return param_res->param_size * 2 + 1;
-		break;
-	case SQL_NUMERIC:
-	/* length full char pad same as SQL column length */
-	default:
-		break;
-	}
-	return param_res->param_size;
-}
-static void db2_inout_parm_pad_data(param_node *param_res, struct pdo_bound_param_data *curr) {
-	char *front = NULL;
-	char *back = NULL;
-	char *here = NULL;
-	int isNeg = 0;
-	int isNum = 0;
-	int len = 0;
-	int need = 0;
-#ifdef PASE /* i5/OS - RPG, COBOL, expect space pad */
-	char pad = 0x20;
-#else /* LUW - c programming null pad (0) */
-	char pad = 0x00;
-#endif /* PASE */
-#if PHP_MAJOR_VERSION >= 7
-	zval *parameter;
-	if (Z_ISREF(curr->parameter)) {
-		parameter = Z_REFVAL(curr->parameter);
-	} else {
-		parameter = &curr->parameter;
-	}
-	len      = Z_STRLEN_P(parameter);
-	front    = Z_STRVAL_P(parameter);
-	here=back= Z_STRVAL_P(parameter) +  len - 1;
-#else
-	len      = Z_STRLEN_P(curr->parameter);
-	front    = Z_STRVAL_P(curr->parameter);
-	here=back= Z_STRVAL_P(curr->parameter) + len - 1;
-#endif
-	/*
-	* character cast to number pad
-	* Example: 
-	* BIGINT<implicit>CHAR works consistently if 0x30 pad left, 
-	* '2' becomes '000000000000000000002'
-	*/
-	switch ( param_res->data_type ) {
-	case SQL_SMALLINT:
-	case SQL_INTEGER:
-	case SQL_REAL:
-	case SQL_FLOAT:
-	case SQL_DOUBLE:
-	case SQL_DECFLOAT:
-	case SQL_BIGINT:
-	case SQL_DECIMAL:
-	case SQL_NUMERIC:
-		for (;here>=front;here--) {
-			if (*here == '-') {
-				isNeg = 1;
-			}
-			if ((*here>='0' && *here<='9') || *here == '.') {
-				isNum = 1;
-				*back = *here;
-				back--;
-			} else if (isNum) {
-				*back = '0';
-				back--;
-			}
-		}
-		for (;back>=front;back--) {
-			*back = '0';
-		}
-		if (isNeg==1) {
-			*front = '-';
-			back--;
-		}
-		break;
-	default:
-		/* 
-		* character pad (platform dependent)
-		* IBM i (PASE):
-		* 'hi' becomes 'hi' + 0x2020202020(00) 
-		* LUW:
-		* 'hi' becomes 'hi' + 0x0000000000(00)
-		*/
-		len = strlen(front);
-		here = front + len;
-		back--;
-		for (;back>=here;back--) {
-			*back = pad;
-		}
-		break;
-	}
-}
-static void db2_inout_parm_pad_return(param_node *param_res, struct pdo_bound_param_data *curr) {
-	char *front = NULL;
-	char *back = NULL;
-	char *here = NULL;
-	int len = param_res->transfer_length;
-#if PHP_MAJOR_VERSION >= 7
-	zval *parameter;
-	if (Z_ISREF(curr->parameter)) {
-		parameter = Z_REFVAL(curr->parameter);
-	} else {
-		parameter = &curr->parameter;
-	}
-	front    = Z_STRVAL_P(parameter);
-	here=back= Z_STRVAL_P(parameter) +  len - 1;
-#else
-	front    = Z_STRVAL_P(curr->parameter);
-	here=back= Z_STRVAL_P(curr->parameter) + len - 1;
-#endif
-	/* trim trailing 'junk' */
-	for (;back>=front;back--) {
-#ifdef PASE /* i5/OS - also annoying trailing ebcdic space (0x40) */
-		if (*back == 0x00 || *back == 0x20 || *back == 0x40)
-#else /* LUW -- assume trim also wanted */
-		if (*back == 0x00 || *back == 0x20)
-#endif /* PASE */
-		{
-			param_res->transfer_length--;
-			*back = '0';
-		} else {
-			break;
-		}
-	}
-
-}
-
 /*
 * Bind a statement parameter to the PHP value supplying or receiving the
 * parameter data.
 */
 int stmt_bind_parameter(pdo_stmt_t *stmt, struct pdo_bound_param_data *curr TSRMLS_DC)
 {
-	int rc, is_num = 0, is_null = 0, is_empty = 0;
+	int rc, is_num = 0;
 	stmt_handle *stmt_res = (stmt_handle *) stmt->driver_data;
 	param_node *param_res = NULL;
 	SQLSMALLINT inputOutputType = 0;
-	SQLSMALLINT switchInputOutputType = 0;
-	int origlen = 0;
+#ifdef PASE
 	char *data_buf = NULL;
-	int how_to_handle_empty_string = 0;
+#endif
 
 #if PHP_MAJOR_VERSION >= 7
-	zval *parameter;
-	if (Z_ISREF(curr->parameter)) {
-		parameter = Z_REFVAL(curr->parameter);
-	} else {
-		parameter = &curr->parameter;
-	}
+    zval *parameter;
+    if (Z_ISREF(curr->parameter)) {
+            parameter = Z_REFVAL(curr->parameter);
+    } else {
+            parameter = &curr->parameter;
+    }
 #endif
 
 	/* make sure we have current description information. */
 	if (stmt_get_parameter_info(stmt, curr TSRMLS_CC) == FALSE) {
 		return FALSE;
 	}
+
 	param_res = (param_node *) curr->driver_data;
 
 	/*
@@ -558,26 +413,6 @@ int stmt_bind_parameter(pdo_stmt_t *stmt, struct pdo_bound_param_data *curr TSRM
 		inputOutputType = SQL_PARAM_OUTPUT;
 	}
 
-#if PHP_MAJOR_VERSION >= 7
-	/* IS_NULL special handling (before any alterations) */
-	if (Z_TYPE_P(parameter) == IS_NULL) {
-		is_null = 1;
-	}
-	/* IS_EMPTY special handling (before any alterations) */
-	if (Z_TYPE_P(parameter) == IS_STRING && !Z_STRLEN_P(parameter)) {
-		is_empty = 1;
-	}
-#else
-	/* IS_NULL special handling (before any alterations) */
-	if (Z_TYPE_P(curr->parameter) == IS_NULL) {
-		is_null = 1;
-	}
-	/* IS_EMPTY special handling (before any alterations) */
-	if (Z_TYPE_P(curr->parameter) == IS_STRING && !Z_STRLEN_P(curr->parameter)) {
-		is_empty = 1;
-	}
-#endif
-
 	/*
 	* Now do the actual binding, which is controlled by the
 	* PDO supplied type.
@@ -589,39 +424,111 @@ int stmt_bind_parameter(pdo_stmt_t *stmt, struct pdo_bound_param_data *curr TSRM
 				"Driver does not support statement parameters");
 			return FALSE;
 
-		/* this is a long value for PHP (or user forced) */
+		/* this is a long value for PHP */
 		case PDO_PARAM_INT:
 		/*
-			* If the parameter type is a numeric type, 
-			* we'll bind this directly
-			* (param_res->ctype db2 provided field description)
+		* If the parameter type is a numeric type, we'll bind this
+		* directly,
 		*/
 			if (param_res->ctype == SQL_C_LONG) {
-				/* promote to null */
-				if (is_null || is_empty) {
-					is_null = 1;
-				} else {
+#ifdef PASE /* i5/OS SQLBindParameter null issues */
 #if PHP_MAJOR_VERSION >= 7
-						convert_to_long(parameter);
-					data_buf = &Z_LVAL_P(parameter);
+				if (parameter == NULL || Z_TYPE_P(parameter) == IS_NULL)
+					convert_to_long(parameter);
 #else
-						convert_to_long(curr->parameter);
-					data_buf = &Z_LVAL_P(curr->parameter);
+				if (Z_TYPE_P(curr->parameter) == IS_NULL)
+					convert_to_long(curr->parameter);
 #endif
+#endif /* PASE */
+
+#if PHP_MAJOR_VERSION >= 7
+                                zval *parameter;
+                                if (Z_ISREF(curr->parameter)) {
+                                        parameter = Z_REFVAL(curr->parameter);
+                                } else {
+                                        parameter = &curr->parameter;
+                                }
+                                if ( parameter == NULL || Z_TYPE_P(parameter) == IS_NULL ) {
+#else                    
+				if (Z_TYPE_P(curr->parameter) == IS_NULL) {
+#endif
+					/* null value was found */
+					param_res->transfer_length = SQL_NULL_DATA;
+					rc = SQLBindParameter(stmt_res->hstmt,
+							curr->paramno + 1,
+							inputOutputType,
+							param_res->ctype,
+							param_res->data_type,
+							param_res->param_size,
+							param_res->scale, NULL,
+							curr->max_value_len <=
+							0 ? 0 : curr->max_value_len,
+							&param_res->transfer_length);
+					check_stmt_error(rc, "SQLBindParameter");
+					return TRUE;
+				} else {
+#ifdef PASE /* i5/OS SQLBindParameter string ptr to null byte issues */
+#if PHP_MAJOR_VERSION >= 7
+					if (Z_TYPE_P(parameter) == IS_STRING
+							&& !strcmp(curr->parameter.value.str->val, ""))
+						convert_to_long(parameter);
+#else
+					if (Z_TYPE_P(curr->parameter) == IS_STRING
+							&& !strcmp(curr->parameter->value.str.val, ""))
+						convert_to_long(curr->parameter);
+#endif
+#endif /* PASE */
+
+#if PHP_MAJOR_VERSION >= 7
+					convert_to_string(parameter);
+#else
+					convert_to_string(curr->parameter);
+#endif
+
+#if PHP_MAJOR_VERSION >= 7
+					if (!strcmp(curr->parameter.value.str->val, "")) {
+#else
+					if (!strcmp(curr->parameter->value.str.val, "")) {
+#endif
+						/* empty string was found */
+						param_res->transfer_length = SQL_NULL_DATA;
 						rc = SQLBindParameter(stmt_res->hstmt,
 								curr->paramno + 1,
 								inputOutputType,
-						SQL_C_LONG,
+								param_res->ctype,
+								param_res->data_type,
+								param_res->param_size,
+								param_res->scale, NULL,
+								curr->max_value_len <=
+								0 ? 0 : curr->max_value_len,
+								&param_res->transfer_length);
+						check_stmt_error(rc, "SQLBindParameter");
+						return TRUE;
+					} else {
+						/* force this to be a real boolean value */
+#if PHP_MAJOR_VERSION >= 7
+	          				convert_to_string(parameter);
+#else
+           					convert_to_string(curr->parameter);
+#endif
+						rc = SQLBindParameter(stmt_res->hstmt,
+								curr->paramno + 1,
+								inputOutputType, SQL_C_LONG,
 								param_res->data_type,
 								param_res->param_size,
 								param_res->scale,
-						data_buf,
-						0, 
-						NULL);
+#if PHP_MAJOR_VERSION >= 7
+								&((curr->parameter).value.lval),
+#else
+								&((curr->parameter)->value.lval),
+#endif
+								0, NULL);
 						check_stmt_error(rc, "SQLBindParameter");
 						return TRUE;
 					}
 				}
+			}
+
 		/*
 		* NOTE:  We fall through from above if there is a
 		* type mismatch.
@@ -631,44 +538,99 @@ int stmt_bind_parameter(pdo_stmt_t *stmt, struct pdo_bound_param_data *curr TSRM
 		case PDO_PARAM_BOOL:
 		case PDO_PARAM_STR:
 			/*
-			* SQL_PARAM_INPUT        -- null remain untouched       (read)
-			*                           non-null convert string     (update)
-			* SQL_PARAM_OUTPUT       -- force big enough out buffer (write)
-			* SQL_PARAM_INPUT_OUTPUT -- force big enough out buffer (write)
+			* If we're capable of handling an integer value, but
+			* PDO  is telling us string, then change this now.
 			*/
-			switch(inputOutputType) {
-			case SQL_PARAM_INPUT:
-				/*
-				* IS_NULL special handling
-				* php variable remain untouched (goal)
-				*/
-				if (is_null) {
+			if (param_res->ctype == SQL_C_LONG) {
+				/* change this to a character type */
+#ifdef PASE /* i5/OS SQLBindParameter string ptr to null byte issues */
 #if PHP_MAJOR_VERSION >= 7
-					data_buf = &Z_LVAL_P(parameter);
+				if (!strcmp(curr->parameter.value.str->val, ""))
+					convert_to_long(parameter);
 #else
-					data_buf = &Z_LVAL_P(curr->parameter);
+				if (!strcmp(curr->parameter->value.str.val, ""))
+					convert_to_long(curr->parameter);
 #endif
-					break;
-                                }
-				/* fall through to force string */
-			case SQL_PARAM_INPUT_OUTPUT:
-			case SQL_PARAM_OUTPUT:
-			default:
-				/* force this to be a real string value */
+#endif /* PASE */
 				param_res->ctype = SQL_C_CHAR;
+				is_num = 1;
+			}
+#ifdef PASE /* i5/OS SQLBindParameter null issues */
+			if ((param_res->data_type == SQL_CLOB
+				|| param_res->data_type == SQL_DBCLOB)
+#if PHP_MAJOR_VERSION >= 7
+				&& (parameter == NULL || Z_TYPE_P(parameter) == IS_NULL))
+				convert_to_string(parameter);
+#else
+				&& Z_TYPE_P(curr->parameter) == IS_NULL)
+				convert_to_string(curr->parameter);
+#endif
+#endif /* PASE */
+#if PHP_MAJOR_VERSION >= 7
+                                if ( parameter == NULL || Z_TYPE_P(parameter) == IS_NULL ||
+                                    (is_num && Z_STRVAL_P(parameter) != NULL &&
+                                     (Z_STRVAL_P(parameter) == '\0'))) { 
+                                     
+#else                    
+			if (Z_TYPE_P(curr->parameter) == IS_NULL
+					|| (is_num && Z_STRVAL_P(curr->parameter) != NULL
+					&& (Z_STRVAL_P(curr->parameter) == '\0'))) {
+#endif
+
+#ifdef PASE /* i5/OS DBCLOB */
+			if (param_res->data_type != SQL_BLOB &&
+					param_res->data_type != SQL_CLOB &&
+					param_res->data_type != SQL_DBCLOB)
+				param_res->ctype = SQL_C_LONG;
+#else
+			if (param_res->data_type != SQL_BLOB &&
+					param_res->data_type != SQL_CLOB)
+				param_res->ctype = SQL_C_LONG;
+#endif /* PASE */
+				if (param_res->data_type != SQL_DECIMAL) {
+					param_res->param_size = 0;
+				}
+				param_res->scale = 0;
+				curr->max_value_len = 0;
+				param_res->transfer_length = SQL_NULL_DATA;
+				switch(param_res->data_type) {
+					case SQL_TYPE_DATE:
+					case SQL_DATETIME:
+					case SQL_TYPE_TIME:
+					case SQL_TYPE_TIMESTAMP:
+						param_res->transfer_length = SQL_NULL_DATA;
+						param_res->ctype = SQL_C_CHAR;
+						rc = SQLBindParameter(stmt_res->hstmt, curr->paramno + 1,
+								inputOutputType, param_res->ctype,
+								param_res->data_type,
+								param_res->param_size,
+								param_res->scale, NULL,
+								curr->max_value_len <=
+								0 ? 0 : curr->max_value_len,
+								&param_res->transfer_length);
+						break;
+
+					default:
+						rc = SQLBindParameter(stmt_res->hstmt, curr->paramno + 1,
+								inputOutputType, param_res->ctype,
+								param_res->data_type,
+								param_res->param_size,
+								param_res->scale,
+#if PHP_MAJOR_VERSION >= 7
+								&((curr->parameter).value.lval),
+#else
+								&((curr->parameter)->value.lval),
+#endif
+								curr->max_value_len,
+								&param_res->transfer_length);
+				}
+				check_stmt_error(rc, "SQLBindParameter");
+			} else {
+				/* force this to be a real string value */
 #if PHP_MAJOR_VERSION >= 7
 				convert_to_string(parameter);
 #else
 				convert_to_string(curr->parameter);
-#endif
-                                     
-				/* buffer and size before alterations */
-#if PHP_MAJOR_VERSION >= 7
-				data_buf = Z_STRVAL_P(parameter);
-				origlen = Z_STRLEN_P(parameter);
-#else                    
-				origlen = Z_STRLEN_P(curr->parameter);
-				data_buf = Z_STRVAL_P(curr->parameter);
 #endif
 				/*
 				* The transfer length to zero now...this
@@ -676,167 +638,81 @@ int stmt_bind_parameter(pdo_stmt_t *stmt, struct pdo_bound_param_data *curr TSRM
 				*/
 				param_res->transfer_length = 0;
 
-				/*
-				* empty string is common ($var=''), 
-				* but what to do with DB2 implicit CAST error
-				* inserting to a database 'numeric' field
-				* (CREATE TABLE animals (id INTEGER))?
-				*/
-				how_to_handle_empty_string = 2;
-				if (inputOutputType == SQL_PARAM_INPUT && !is_null && !origlen) {
-					switch (how_to_handle_empty_string) {
-					case 1:
-						/*
-						* tough luck! Let DB2 throw a CAST error 
-						* (cruel database expert) 
-						*/
-						break;
-					case 2:
-						/*
-						* empty string to promote to null
-						* (kind database expert) 
-						*/
-						switchInputOutputType = db2_inout_parm_numeric(param_res);
-						if (switchInputOutputType) {
-							switchInputOutputType = 0;
-							is_null = 1;
-						}
-						break;
-					case 3:
-					default:
-						/*
-						* empty string to promote to zero 
-						* (simple mutable php) 
-						*/
-						switchInputOutputType = db2_inout_parm_numeric(param_res);
-						if (switchInputOutputType) {
-							inputOutputType = SQL_PARAM_OUTPUT;
-							curr->max_value_len = 1;
-						}
-						break;
-					}
-				}
-				break;
-			} /* switch */
-
-			/*
-			* SQL_PARAM_INPUT        -- any size buffer
-			* SQL_PARAM_OUTPUT       -- need max size buffer
-			* SQL_PARAM_INPUT_OUTPUT -- need max size buffer
-			*/
-			switch (inputOutputType) {
-			case SQL_PARAM_INPUT:
-				/* IS_NULL special handling */
-				if (is_null) {
-					switchInputOutputType = db2_inout_parm_numeric(param_res);
-					if (switchInputOutputType) {
-				param_res->ctype = SQL_C_LONG;
-						switchInputOutputType = 0;
-				}
-				curr->max_value_len = 0;
-				param_res->transfer_length = SQL_NULL_DATA;
-					rc = SQLBindParameter(stmt_res->hstmt,
-						curr->paramno + 1,
-						inputOutputType,
-						param_res->ctype,
-								param_res->data_type,
-								param_res->param_size,
-						param_res->scale,
-						data_buf,
-								curr->max_value_len <=
-								0 ? 0 : curr->max_value_len,
-								&param_res->transfer_length);
-					check_stmt_error(rc, "SQLBindParameter");
-					return TRUE;
-				}
-						break;
-			case SQL_PARAM_INPUT_OUTPUT:
-			case SQL_PARAM_OUTPUT:
-					default:
-				/*
-				* IS_INTERNED() macro to check if a given char* is interned or regular string
-				* each string (or atom) is allocated once and never changed (immutable)
-				* aka, not useful for INOUT and OUT paramters obviously
-				*/
-#if PHP_MAJOR_VERSION >= 7
-				if (IS_INTERNED(Z_STR_P(parameter))) {
-					Z_STR_P(parameter) = zend_string_init(Z_STRVAL_P(parameter), Z_STRLEN_P(parameter), 0);
-				}
-#else
-				if (IS_INTERNED(Z_STRVAL_P(curr->parameter))) {
-					Z_STRVAL_P(curr->parameter) = estrndup(Z_STRVAL_P(curr->parameter), Z_STRLEN_P(curr->parameter));
-				}
-#endif
+#ifdef PASE /* param_size reset LUW error??? */
 				/*
 				* Now we need to make sure the string buffer
 				* is large enough to receive a new value if
 				* this is an output or in/out parameter
 				*/
-				curr->max_value_len = db2_inout_parm_pad_len(param_res);
 #if PHP_MAJOR_VERSION >= 7
-				if (curr->max_value_len > Z_STRLEN_P(parameter)) {
+				if (inputOutputType != SQL_PARAM_INPUT && param_res->param_size > Z_STRLEN_P(parameter)) {
 					/* reallocate this to the new size */
-					Z_STR_P(parameter) = zend_string_extend(Z_STR_P(parameter), curr->max_value_len, 0);
+                    Z_PTR_P(parameter) = erealloc(Z_STRVAL_P(parameter), param_res->param_size + 1);
 					check_stmt_allocation(Z_STRVAL_P(parameter),
 							"stmt_bind_parameter",
 							"Unable to allocate bound parameter");
 				}
 #else
-				if (curr->max_value_len > Z_STRLEN_P(curr->parameter)) {
+				if (inputOutputType != SQL_PARAM_INPUT && param_res->param_size > Z_STRLEN_P(curr->parameter)) {
 					/* reallocate this to the new size */
-					Z_STRVAL_P(curr->parameter) = erealloc(Z_STRVAL_P(curr->parameter), curr->max_value_len + 1);
+					Z_STRVAL_P(curr->parameter) = erealloc(Z_STRVAL_P(curr->parameter), param_res->param_size + 1);
 					check_stmt_allocation(Z_STRVAL_P(curr->parameter),
 							"stmt_bind_parameter",
 							"Unable to allocate bound parameter");
-					Z_STRLEN_P(curr->parameter) = curr->max_value_len;
-					memset(Z_STRVAL_P(curr->parameter) + origlen, 0, curr->max_value_len - origlen);
-					Z_STRVAL_P(curr->parameter)[curr->max_value_len] = '\0';
 				}
 #endif
-				/* correct format of string data implicit CAST (if needed) */
-				db2_inout_parm_pad_data(param_res, curr);
 
-				/* switch type for CAST help (kind zero way) */
-				if (switchInputOutputType) {
-					inputOutputType = SQL_PARAM_INPUT;
-				}
+#else /*PASE */
 
-				break;
-			} /* switch */
-
-			/* data buf (after alterations) */
 #if PHP_MAJOR_VERSION >= 7
-			data_buf = Z_STRVAL_P(parameter);
-			param_res->param_size = Z_STRLEN_P(parameter);
+				param_res->param_size = Z_STRLEN_P(parameter);
 #else
-			data_buf = Z_STRVAL_P(curr->parameter);
-			param_res->param_size = Z_STRLEN_P(curr->parameter);
+				param_res->param_size = Z_STRLEN_P(curr->parameter);
 #endif
-			/* binary */
-			switch(param_res->data_type) {
-			case SQL_BINARY:
-			case SQL_LONGVARBINARY:
-			case SQL_VARBINARY:
-			case SQL_BLOB:
-				param_res->ctype = SQL_C_BINARY;
-				break;
-			default:
-				param_res->ctype = SQL_C_CHAR;
-				break;
-			}
-			/* bind as char */
-			rc = SQLBindParameter(stmt_res->hstmt,
-					curr->paramno + 1,
-					inputOutputType,
-					param_res->ctype,
-					param_res->data_type,
-					param_res->param_size,
-					param_res->scale,
-					data_buf,
+
+				/*
+				* Now we need to make sure the string buffer
+				* is large enough to receive a new value if
+				* this is an output or in/out parameter
+				*/
+#if PHP_MAJOR_VERSION >= 7
+				if (inputOutputType != SQL_PARAM_INPUT &&
+						curr->max_value_len > Z_STRLEN_P(parameter)) {
+					/* reallocate this to the new size */
+                                       Z_PTR_P(parameter) =  erealloc(Z_STRVAL_P(parameter),
+                                                        curr->max_value_len + 1);
+					check_stmt_allocation(Z_STRVAL_P(parameter),
+							"stmt_bind_parameter",
+							"Unable to allocate bound parameter");
+				}
+#else
+				if (inputOutputType != SQL_PARAM_INPUT &&
+						curr->max_value_len > Z_STRLEN_P(curr->parameter)) {
+					/* reallocate this to the new size */
+					Z_STRVAL_P(curr->parameter) = erealloc(Z_STRVAL_P(curr->parameter),
+							curr->max_value_len + 1);
+					check_stmt_allocation(Z_STRVAL_P(curr->parameter),
+							"stmt_bind_parameter",
+							"Unable to allocate bound parameter");
+				}
+#endif
+#endif /* PASE */
+				rc = SQLBindParameter(stmt_res->hstmt, curr->paramno + 1,
+						inputOutputType, param_res->ctype,
+						param_res->data_type,
+						param_res->param_size,
+						param_res->scale,
+#if PHP_MAJOR_VERSION >= 7
+						Z_STRVAL_P(parameter),
+#else
+						Z_STRVAL_P(curr->parameter),
+#endif
 						curr->max_value_len <=
 						0 ? 0 : curr->max_value_len,
 						&param_res->transfer_length);
 				check_stmt_error(rc, "SQLBindParameter");
+			}
+
 			return TRUE;
 
 		/*
@@ -853,42 +729,46 @@ int stmt_bind_parameter(pdo_stmt_t *stmt, struct pdo_bound_param_data *curr TSRM
 				/* transfer this as character data. */
 				param_res->ctype = SQL_C_CHAR;
 			}
-
-			/*
-			* CLOB, DBCLOB = CHAR
-			* BLOB, XML, other = BINARY
-			*/
-			switch(param_res->data_type) {
-			case SQL_CLOB:
-#ifdef PASE /* i5/OS - include DBCLOB */
-			case SQL_DBCLOB:
-#endif /* PASE */
-				param_res->ctype = SQL_C_CHAR;
-				break;
-			default:
-					param_res->ctype = SQL_C_BINARY;
-				break;
-			}
-
-			/* indicate we're going to transfer the data at exec time. */
-			param_res->transfer_length = SQL_DATA_AT_EXEC;
-			data_buf = curr;
-
-#ifdef PASE /* i5/OS - to cause a conversion to ebcdic */
-#if PHP_MAJOR_VERSION >= 7
-			if (Z_TYPE_P(parameter) != IS_RESOURCE) {
-				param_res->transfer_length = SQL_LEN_DATA_AT_EXEC(Z_STRLEN_P(parameter));
-				/* get the pointer to the string data */
-				data_buf = Z_STRVAL_P(parameter);
+#ifndef PASE
+			if (param_res->data_type == SQL_BLOB ||
+				param_res->data_type == SQL_XML ||
+				param_res->data_type == SQL_CLOB) {
+				/* transfer this as binary data. */
+				param_res->ctype = SQL_C_BINARY;
 			}
 #else
-			if (Z_TYPE_P(curr->parameter) != IS_RESOURCE) {
+			if (param_res->data_type == SQL_CLOB
+				|| param_res->data_type == SQL_DBCLOB) {
+				param_res->ctype = SQL_C_CHAR;
+			} else {
+				param_res->ctype = SQL_C_BINARY;
+			}
+#endif
+
+			/* indicate we're going to transfer the data at exec time. */
+#ifndef PASE
+			param_res->transfer_length = SQL_DATA_AT_EXEC;
+#else
+#if PHP_MAJOR_VERSION >= 7
+            if (Z_TYPE_P(parameter) == IS_RESOURCE) {
+#else                
+			if (Z_TYPE_P(curr->parameter) == IS_RESOURCE) {
+#endif
+				param_res->transfer_length = SQL_DATA_AT_EXEC;
+				data_buf = (char *)curr;
+			} else {
+#if PHP_MAJOR_VERSION >= 7
+				param_res->transfer_length = SQL_LEN_DATA_AT_EXEC(Z_STRLEN_P(parameter));     
+				/* get the pointer to the string data */
+				data_buf = Z_STRVAL_P(parameter);
+#else
 				param_res->transfer_length = SQL_LEN_DATA_AT_EXEC(Z_STRLEN_P(curr->parameter));     
 				/* get the pointer to the string data */
 				data_buf = Z_STRVAL_P(curr->parameter);
+#endif
+				/* to cause a conversion to ebcdic */
 			}
 #endif
-#endif /* PASE */
 
 			/*
 			* We can't bind LOBs at this point...we process all
@@ -903,7 +783,11 @@ int stmt_bind_parameter(pdo_stmt_t *stmt, struct pdo_bound_param_data *curr TSRM
 					inputOutputType, param_res->ctype,
 					param_res->data_type,
 					param_res->param_size, param_res->scale,
-					data_buf,
+#ifndef PASE
+					(SQLPOINTER) curr,
+#else
+					(SQLPOINTER) data_buf,
+#endif
 					4096,
 					&param_res->transfer_length);
 			check_stmt_error(rc, "SQLBindParameter");
@@ -1034,7 +918,6 @@ static int stmt_parameter_pre_execute(pdo_stmt_t *stmt, struct pdo_bound_param_d
 	return TRUE;
 }
 
-
 /* post-execution bound parameter handling. */
 static int stmt_parameter_post_execute(pdo_stmt_t *stmt, struct pdo_bound_param_data *curr TSRMLS_DC)
 {
@@ -1073,10 +956,6 @@ static int stmt_parameter_post_execute(pdo_stmt_t *stmt, struct pdo_bound_param_
 			ZVAL_EMPTY_STRING(curr->parameter);
 #endif
 		} else {
-			/* possible implicit CAST issues inout parms */
-			if (param_res->data_type != SQL_PARAM_INPUT) {
-				db2_inout_parm_pad_return(param_res, curr);
-			}
 #if PHP_MAJOR_VERSION >= 7
 			Z_STRLEN_P(parameter) = param_res->transfer_length;
 			Z_STRVAL_P(parameter)[param_res->transfer_length] = '\0';
@@ -1102,17 +981,19 @@ static int stmt_bind_column(pdo_stmt_t *stmt, int colno TSRMLS_DC)
 	col = &stmt->columns[colno];
 
 	switch (col_res->data_type) {
-#ifndef PASE /* i5/OS - not LOBs */
+#ifndef PASE
 		case SQL_LONGVARBINARY:
 		case SQL_VARBINARY:
 		case SQL_BINARY:
-		case SQL_XML:
-#endif /* PASE */
+#endif
 		case SQL_BLOB:
 		case SQL_CLOB:
 #ifdef PASE /* i5 DBCLOB locator */
 		case SQL_DBCLOB:
+#else
+		case SQL_XML:
 #endif /* PASE */
+			{
 				/* we're going to need to do getdata calls to retrieve these */
 				col_res->out_length = 0;
 				/* and this is returned as a stream */
@@ -1141,18 +1022,20 @@ static int stmt_bind_column(pdo_stmt_t *stmt, int colno TSRMLS_DC)
 						&col_res->lob_loc,
 						4,
 						&col_res->loc_ind);
+			}
 			break;
 		/*
 		* A form we need to force into a string value...
 		* this includes any unknown types
 		*/
-#ifdef PASE /* i5/os - not LOBs */
-		case SQL_LONGVARBINARY:
+#ifdef PASE
 		case SQL_VARBINARY:
 		case SQL_BINARY:
 		case SQL_XML:
-#endif /* PASE */
+#endif
+#ifndef PASE
 		case SQL_LONGVARCHAR:
+#endif /* PASE */
 		case SQL_CHAR:
 		case SQL_VARCHAR:
 		case SQL_TYPE_TIME:
@@ -1387,7 +1270,7 @@ static int ibm_stmt_executer( pdo_stmt_t * stmt TSRMLS_DC)
 static int ibm_stmt_fetcher(
 	pdo_stmt_t *stmt,
 	enum pdo_fetch_orientation ori,
-	zend_long offset
+	long offset
 	TSRMLS_DC)
 {
 	stmt_handle *stmt_res = (stmt_handle *) stmt->driver_data;
@@ -1401,7 +1284,7 @@ static int ibm_stmt_fetcher(
 	for (i = 0; i < stmt->column_count; i++) {
 		stmt_res->columns[i].out_length = 0;
 	}
-#endif  /* PASE */
+#endif
 	/* convert the PDO orientation information to the SQL one */
 	switch (ori) {
 		case PDO_FETCH_ORI_NEXT:
@@ -1436,7 +1319,7 @@ static int ibm_stmt_fetcher(
 #else
 	/* go fetch it. */
 	rc = SQLFetchScroll((SQLHSTMT)stmt_res->hstmt, direction, (SQLINTEGER) offset);
-#endif  /* PASE */
+#endif
 	check_stmt_error(rc, "SQLFetchScroll");
 
 	/*
@@ -1536,7 +1419,6 @@ static int ibm_stmt_describer(
 	column_data *col_res = &stmt_res->columns[colno];
 	struct pdo_column_data *col = NULL;
 	char tmp_name[BUFSIZ];
-	memset(tmp_name, 0, BUFSIZ);
 
 	/* get the column descriptor information */
 	int rc = SQLDescribeCol((SQLHSTMT)stmt_res->hstmt, (SQLSMALLINT)(colno + 1 ),
@@ -1552,7 +1434,7 @@ static int ibm_stmt_describer(
 	rc = SQLColAttributes((SQLHSTMT)stmt_res->hstmt,(SQLSMALLINT)colno+1,SQL_DESC_DISPLAY_SIZE,
 			NULL,0,NULL,&col_res->data_size);
 	check_stmt_error(rc, "SQLColAttributes");
-#endif  /* PASE */
+#endif
 #ifdef PASE /* i5/OS size changes for "common" converts to string */
 	switch (col_res->data_type) {
 		/* BIGINT 9223372036854775807  (2^63-1) string convert */
@@ -1588,7 +1470,7 @@ static int ibm_stmt_describer(
 	} else {
 #if PHP_MAJOR_VERSION >= 7
 	//	col_res->name = estrdup(tmp_name);
-                col_res->name = estrdup(tmp_name);
+                col_res->name = zend_string_init(tmp_name, strlen(tmp_name), 0); 
 #else
 		col_res->name = estrdup(tmp_name);
 #endif
@@ -1600,7 +1482,7 @@ static int ibm_stmt_describer(
 	* Copy the information back into the PDO control block.  Note that
 	* PDO will release the name information, so we don't have to.
 	*/
-	col->name = zend_string_init(col_res->name, col_res->namelen, 0);
+	col->name = col_res->name;
 #if PHP_MAJOR_VERSION < 7
 	col->namelen = col_res->namelen;
 #endif
@@ -1620,7 +1502,7 @@ static int ibm_stmt_get_col(
 	pdo_stmt_t *stmt,
 	int colno,
 	char **ptr,
-	size_t *len,
+	unsigned long *len,
 	int *caller_frees
 	TSRMLS_DC)
 {
@@ -1714,7 +1596,7 @@ static int ibm_stmt_next_rowset(
 */
 static int ibm_stmt_get_column_meta(
 	pdo_stmt_t *stmt,
-	zend_long colno,
+	long colno,
 	zval *return_value
 	TSRMLS_DC)
 {
@@ -1727,7 +1609,7 @@ static int ibm_stmt_get_column_meta(
 	SQLINTEGER length;
 #else
 	SQLSMALLINT length;
-#endif  /* PASE */
+#endif
 	SQLINTEGER numericAttribute;
 #if PHP_MAJOR_VERSION >= 7
 	zval flags;
@@ -1752,34 +1634,8 @@ static int ibm_stmt_get_column_meta(
 	array_init(return_value);
 	add_assoc_long(return_value, "scale", col_res->scale);
 
-#ifdef PASE /* i5/OS - supports few of attributes */
-	/* see if we can retrieve the type name */
-	if (SQLColAttributes(stmt_res->hstmt, colno + 1, SQL_DESC_TYPE_NAME,
-			(SQLPOINTER) attribute_buffer, ATTRIBUTEBUFFERSIZE, (SQLPOINTER)&length,
-			(SQLPOINTER) & numericAttribute) != SQL_ERROR) {
-#if PHP_MAJOR_VERSION >= 7
-		add_assoc_stringl(return_value, "native_type", attribute_buffer, length);
-#else
-		add_assoc_stringl(return_value, "native_type", attribute_buffer, length, 1);
-#endif
-		}
-
-
-#else /* not PASE */
-
-
-	/* see if we can retrieve the type name */
-	if (SQLColAttribute(stmt_res->hstmt, colno + 1, SQL_DESC_TYPE_NAME,
-			(SQLPOINTER) attribute_buffer, ATTRIBUTEBUFFERSIZE, &length,
-			(SQLPOINTER) & numericAttribute) != SQL_ERROR) {
-#if PHP_MAJOR_VERSION >= 7
-		add_assoc_stringl(return_value, "native_type", attribute_buffer, length);
-#else
-		add_assoc_stringl(return_value, "native_type", attribute_buffer, length, 1);
-#endif
-	}
-
 	/* see if we can retrieve the table name  */
+#ifndef PASE
 	if (SQLColAttribute (stmt_res->hstmt, colno + 1, SQL_DESC_BASE_TABLE_NAME,
 			(SQLPOINTER) attribute_buffer, ATTRIBUTEBUFFERSIZE, &length,
 			(SQLPOINTER) & numericAttribute) != SQL_ERROR) {
@@ -1793,11 +1649,31 @@ static int ibm_stmt_get_column_meta(
 #else
 			add_assoc_stringl(return_value, "table", attribute_buffer, length, 1);
 #endif
+		}
 	}
+#endif
+	/* see if we can retrieve the type name */
+#ifndef PASE
+	if (SQLColAttribute(stmt_res->hstmt, colno + 1, SQL_DESC_TYPE_NAME,
+			(SQLPOINTER) attribute_buffer, ATTRIBUTEBUFFERSIZE, &length,
+			(SQLPOINTER) & numericAttribute) != SQL_ERROR) {
+#if PHP_MAJOR_VERSION >= 7
+		add_assoc_stringl(return_value, "native_type", attribute_buffer, length);
+#else
+		add_assoc_stringl(return_value, "native_type", attribute_buffer, length, 1);
+#endif
 	}
-
-
-#endif  /* not PASE */
+#else
+	if (SQLColAttributes(stmt_res->hstmt, colno + 1, SQL_DESC_TYPE_NAME,
+			(SQLPOINTER) attribute_buffer, ATTRIBUTEBUFFERSIZE, (SQLPOINTER)&length,
+			(SQLPOINTER) & numericAttribute) != SQL_ERROR) {
+#if PHP_MAJOR_VERSION >= 7
+		add_assoc_stringl(return_value, "native_type", attribute_buffer, length);
+#else
+		add_assoc_stringl(return_value, "native_type", attribute_buffer, length, 1);
+#endif
+	}
+#endif
 
 #if PHP_MAJOR_VERSION >= 7
 	array_init(&flags);
@@ -1808,10 +1684,8 @@ static int ibm_stmt_get_column_meta(
 	add_assoc_bool(flags, "not_null", !col_res->nullable);
 #endif
 
-#ifndef PASE /* i5/OS - none supported */
-
-
 	/* see if we can retrieve the unsigned attribute */
+#ifndef PASE
 	if (SQLColAttribute(stmt_res->hstmt, colno + 1, SQL_DESC_UNSIGNED,
 			(SQLPOINTER) attribute_buffer, ATTRIBUTEBUFFERSIZE, &length,
 			(SQLPOINTER) & numericAttribute) != SQL_ERROR) {
@@ -1821,8 +1695,10 @@ static int ibm_stmt_get_column_meta(
 		add_assoc_bool(flags, "unsigned", numericAttribute == SQL_TRUE);
 #endif
 	}
+#endif
 
 	/* see if we can retrieve the autoincrement attribute */
+#ifndef PASE
 	if (SQLColAttribute (stmt_res->hstmt, colno + 1, SQL_DESC_AUTO_UNIQUE_VALUE,
 			(SQLPOINTER) attribute_buffer, ATTRIBUTEBUFFERSIZE, &length,
 			(SQLPOINTER) & numericAttribute) != SQL_ERROR) {
@@ -1834,9 +1710,7 @@ static int ibm_stmt_get_column_meta(
 		numericAttribute == SQL_TRUE);
 #endif
 	}
-
-
-#endif /* PASE */
+#endif
 
 	/* add the flags to the result bundle. */
 #if PHP_MAJOR_VERSION >= 7
@@ -1853,7 +1727,7 @@ static int ibm_stmt_get_column_meta(
 /* get driver specific attributes.  We only support CURSOR_NAME. */
 static int ibm_stmt_get_attribute(
 	pdo_stmt_t *stmt,
-	zend_long attr,
+	long attr,
 	zval *return_value
 	TSRMLS_DC)
 {
@@ -1892,7 +1766,7 @@ static int ibm_stmt_get_attribute(
 /* set a driver-specific attribute.  We only support CURSOR_NAME. */
 static int ibm_stmt_set_attribute(
 	pdo_stmt_t *stmt,
-	zend_long attr,
+	long attr,
 	zval *value
 	TSRMLS_DC)
 {
